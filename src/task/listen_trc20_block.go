@@ -17,8 +17,6 @@ import (
 )
 
 const (
-	TronAPIBase = "https://api.trongrid.io"
-
 	// USDT 合约地址 (TRC20 主网)
 	USDTContractHex = "41a614f803b6fd780986a42c78ec9c7f77e6ded13c" // Base58: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
 	// transfer(address,uint256) 方法签名前4字节
@@ -115,7 +113,7 @@ type TransferContractValue struct {
 
 var httpClient = &http.Client{Timeout: RequestTimeout}
 
-func doPost(url string, body interface{}) ([]byte, error) {
+func doPost(url string, apiKey string, body interface{}) ([]byte, error) {
 	data, _ := json.Marshal(body)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
 	if err != nil {
@@ -123,6 +121,9 @@ func doPost(url string, body interface{}) ([]byte, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
+		req.Header.Set("TRON-PRO-API-KEY", apiKey)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -137,8 +138,8 @@ func doPost(url string, body interface{}) ([]byte, error) {
 	return b, nil
 }
 
-func GetNowBlock() (*Block, error) {
-	b, err := doPost(TronAPIBase+"/wallet/getnowblock", map[string]interface{}{})
+func GetNowBlock(baseURL string, apiKey string) (*Block, error) {
+	b, err := doPost(baseURL+"/wallet/getnowblock", apiKey, map[string]interface{}{})
 	if err != nil {
 		return nil, err
 	}
@@ -146,8 +147,8 @@ func GetNowBlock() (*Block, error) {
 	return &block, json.Unmarshal(b, &block)
 }
 
-func GetBlockByNum(num int64) (*Block, error) {
-	b, err := doPost(TronAPIBase+"/wallet/getblockbynum", map[string]interface{}{"num": num})
+func GetBlockByNum(baseURL string, apiKey string, num int64) (*Block, error) {
+	b, err := doPost(baseURL+"/wallet/getblockbynum", apiKey, map[string]interface{}{"num": num})
 	if err != nil {
 		return nil, err
 	}
@@ -281,6 +282,8 @@ func processBlock(block *Block) {
 }
 
 type Scanner struct {
+	baseURL   string
+	apiKey    string
 	lastBlock int64
 	// 统计
 	totalBlocks  int64
@@ -293,8 +296,15 @@ func NewScanner() *Scanner {
 }
 
 func (s *Scanner) Init() error {
-	log.Sugar.Infof("[TRON-BLOCK] node=%s", TronAPIBase)
-	block, err := GetNowBlock()
+	baseURL, apiKey, err := service.ResolveTronNode()
+	if err != nil {
+		return fmt.Errorf("resolve tron node: %w", err)
+	}
+	s.baseURL = baseURL
+	s.apiKey = apiKey
+
+	log.Sugar.Infof("[TRON-BLOCK] node=%s", s.baseURL)
+	block, err := GetNowBlock(s.baseURL, s.apiKey)
 	if err != nil {
 		return fmt.Errorf("获取初始块失败: %w", err)
 	}
@@ -322,7 +332,7 @@ func (s *Scanner) Run() {
 }
 
 func (s *Scanner) poll() {
-	latest, err := GetNowBlock()
+	latest, err := GetNowBlock(s.baseURL, s.apiKey)
 	if err != nil {
 		log.Sugar.Warnf("[TRON-BLOCK] get latest block: %v", err)
 		return
@@ -337,7 +347,7 @@ func (s *Scanner) poll() {
 		if num == latestNum {
 			block = latest
 		} else {
-			block, err = GetBlockByNum(num)
+			block, err = GetBlockByNum(s.baseURL, s.apiKey, num)
 			if err != nil {
 				log.Sugar.Warnf("[TRON-BLOCK] get block %d: %v", num, err)
 				continue

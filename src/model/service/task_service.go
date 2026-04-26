@@ -33,6 +33,10 @@ func resolveTronNode() (string, string, error) {
 	return rpcURL, node.ApiKey, nil
 }
 
+func ResolveTronNode() (string, string, error) {
+	return resolveTronNode()
+}
+
 func TryProcessTronTRC20Transfer(toAddr string, rawValue *big.Int, txHash string, blockTsMs int64) {
 	defer func() {
 		if err := recover(); err != nil {
