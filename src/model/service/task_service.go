@@ -3,19 +3,35 @@ package service
 import (
 	"errors"
 	"fmt"
-	"github.com/assimon/luuu/model/data"
-	"github.com/assimon/luuu/model/mdb"
-	"github.com/assimon/luuu/model/request"
-	"github.com/assimon/luuu/telegram"
-	"github.com/assimon/luuu/util/constant"
-	"github.com/assimon/luuu/util/log"
-	"github.com/assimon/luuu/util/math"
+	"math/big"
+	"strings"
+
+	"github.com/GMWalletApp/epusdt/model/data"
+	"github.com/GMWalletApp/epusdt/model/mdb"
+	"github.com/GMWalletApp/epusdt/model/request"
+	"github.com/GMWalletApp/epusdt/notify"
+	"github.com/GMWalletApp/epusdt/util/constant"
+	"github.com/GMWalletApp/epusdt/util/log"
+	"github.com/GMWalletApp/epusdt/util/math"
 	"github.com/dromara/carbon/v2"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/shopspring/decimal"
-	"math/big"
-	"strings"
 )
+
+func resolveTronNode() (string, string, error) {
+	node, err := data.SelectRpcNode(mdb.NetworkTron, mdb.RpcNodeTypeHttp)
+	if err != nil {
+		return "", "", err
+	}
+	if node == nil || node.ID == 0 {
+		return "", "", fmt.Errorf("no enabled %s %s RPC node configured in rpc_nodes", mdb.NetworkTron, mdb.RpcNodeTypeHttp)
+	}
+	rpcURL := strings.TrimRight(strings.TrimSpace(node.Url), "/")
+	if rpcURL == "" {
+		return "", "", fmt.Errorf("rpc_nodes id=%d has empty url", node.ID)
+	}
+	return rpcURL, node.ApiKey, nil
+}
 
 func TryProcessTronTRC20Transfer(toAddr string, rawValue *big.Int, txHash string, blockTsMs int64) {
 	defer func() {
@@ -277,7 +293,7 @@ func sendPaymentNotification(order *mdb.Orders) {
 		order.CreatedAt.ToDateTimeString(),
 		carbon.Now().ToDateTimeString(),
 	)
-	telegram.SendToBot(msg)
+	notify.Dispatch(mdb.NotifyEventPaySuccess, msg)
 }
 
 func networkDisplay(n string) string {

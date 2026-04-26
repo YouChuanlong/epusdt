@@ -11,10 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/assimon/luuu/config"
-	tron "github.com/assimon/luuu/crypto"
-	"github.com/assimon/luuu/model/service"
-	"github.com/assimon/luuu/util/log"
+	tron "github.com/GMWalletApp/epusdt/crypto"
+	"github.com/GMWalletApp/epusdt/model/service"
+	"github.com/GMWalletApp/epusdt/util/log"
 )
 
 const (
@@ -124,9 +123,6 @@ func doPost(url string, body interface{}) ([]byte, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	if k := strings.TrimSpace(config.TRON_GRID_API_KEY); k != "" {
-		req.Header.Set("TRON-PRO-API-KEY", k)
-	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

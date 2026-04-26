@@ -7,19 +7,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/assimon/luuu/model/data"
-	"github.com/assimon/luuu/model/mdb"
-	"github.com/assimon/luuu/model/service"
-	"github.com/assimon/luuu/util/log"
+	"github.com/GMWalletApp/epusdt/model/data"
+	"github.com/GMWalletApp/epusdt/model/mdb"
+	"github.com/GMWalletApp/epusdt/model/service"
+	"github.com/GMWalletApp/epusdt/util/log"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
-)
-
-var (
-	plasmaUsdt0Contract = common.HexToAddress("0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb")
 )
 
 type plasmaRecipientSnapshot struct {
@@ -28,7 +24,23 @@ type plasmaRecipientSnapshot struct {
 
 var plasmaWatchedRecipients atomic.Pointer[plasmaRecipientSnapshot]
 
+// StartPlasmaWebSocketListener drives the Plasma listener with dynamic
+// chain/token config reload every 10s.
 func StartPlasmaWebSocketListener() {
+	for {
+		if data.IsChainEnabled(mdb.NetworkPlasma) {
+			if contracts := loadChainTokenContracts(mdb.NetworkPlasma, "[PLASMA-WS]"); len(contracts) > 0 {
+				runPlasmaListener(contracts)
+			}
+		}
+		time.Sleep(10 * time.Second)
+	}
+}
+
+func runPlasmaListener(contracts []common.Address) {
+	ctx, cancel := chainEnabledWatchdog(mdb.NetworkPlasma, "[PLASMA-WS]", chainTokenFingerprint(mdb.NetworkPlasma))
+	defer cancel()
+
 	wallets, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkPlasma)
 	if err != nil {
 		log.Sugar.Errorf("[PLASMA-WS] Failed to get wallet addresses: %v", err)
@@ -38,23 +50,33 @@ func StartPlasmaWebSocketListener() {
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			w, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkPlasma)
-			if err != nil {
-				log.Sugar.Warnf("[PLASMA-WS] refresh wallet addresses: %v", err)
-				continue
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				w, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkPlasma)
+				if err != nil {
+					log.Sugar.Warnf("[PLASMA-WS] refresh wallet addresses: %v", err)
+					continue
+				}
+				storePlasmaRecipientsFromWallets(w)
 			}
-			storePlasmaRecipientsFromWallets(w)
 		}
 	}()
-	// 文档提供 https://rpc.plasma.to；常见实现同主机 wss
-	wsURL := "wss://rpc.plasma.to"
+
+	wsURL, ok := resolveChainWsURL(mdb.NetworkPlasma, "[PLASMA-WS]")
+	if !ok {
+		return
+	}
+	log.Sugar.Infof("[PLASMA-WS] connecting to %s watching %d contract(s)", wsURL, len(contracts))
+
 	query := ethereum.FilterQuery{
-		Addresses: []common.Address{plasmaUsdt0Contract},
+		Addresses: contracts,
 		Topics:    [][]common.Hash{},
 	}
 
-	runEvmWsLogListener("[PLASMA-WS]", wsURL, query, func(client *ethclient.Client, vLog types.Log) {
+	runEvmWsLogListener(ctx, "[PLASMA-WS]", wsURL, query, func(client *ethclient.Client, vLog types.Log) {
 		if len(vLog.Topics) < 3 {
 			return
 		}

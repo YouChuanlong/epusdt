@@ -10,13 +10,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/assimon/luuu/config"
-	"github.com/assimon/luuu/model/data"
-	"github.com/assimon/luuu/model/mdb"
-	"github.com/assimon/luuu/model/request"
-	"github.com/assimon/luuu/util/constant"
-	"github.com/assimon/luuu/util/log"
-	"github.com/assimon/luuu/util/math"
+	"github.com/GMWalletApp/epusdt/config"
+	"github.com/GMWalletApp/epusdt/model/data"
+	"github.com/GMWalletApp/epusdt/model/mdb"
+	"github.com/GMWalletApp/epusdt/model/request"
+	"github.com/GMWalletApp/epusdt/util/constant"
+	"github.com/GMWalletApp/epusdt/util/log"
+	"github.com/GMWalletApp/epusdt/util/math"
 	"github.com/gagliardetto/solana-go"
 	"github.com/go-resty/resty/v2"
 	"github.com/shopspring/decimal"
@@ -45,6 +45,33 @@ func SolCallBack(address string, wg *sync.WaitGroup) {
 		}
 	}()
 
+	// Load enabled Solana tokens from chain_tokens. The contract_address
+	// column holds the mint for SPL tokens; a special entry with
+	// symbol=SOL and empty contract_address enables native SOL payments.
+	tokens, err := data.ListEnabledChainTokensByNetwork(mdb.NetworkSolana)
+	if err != nil {
+		log.Sugar.Errorf("[SOL][%s] load chain_tokens err=%v", address, err)
+		return
+	}
+	if len(tokens) == 0 {
+		log.Sugar.Debugf("[SOL][%s] no enabled chain_tokens, skipping", address)
+		return
+	}
+	mintTokens := make(map[string]*mdb.ChainToken, len(tokens))
+	var nativeSolToken *mdb.ChainToken
+	for i := range tokens {
+		sym := strings.ToUpper(strings.TrimSpace(tokens[i].Symbol))
+		mint := strings.TrimSpace(tokens[i].ContractAddress)
+		if sym == "SOL" && mint == "" {
+			nativeSolToken = &tokens[i]
+			continue
+		}
+		if mint == "" {
+			continue
+		}
+		mintTokens[mint] = &tokens[i]
+	}
+
 	// Clean up old entries from processed cache (older than 1 hour)
 	cleanupCutoff := time.Now().Add(-1 * time.Hour).Unix()
 	gProcessedSignatures.Range(func(key, value interface{}) bool {
@@ -56,17 +83,15 @@ func SolCallBack(address string, wg *sync.WaitGroup) {
 
 	limit := 1000
 
-	// 查询钱包地址 + USDT ATA + USDC ATA 三个地址的签名
+	// 查询钱包地址 + 每个已启用 SPL 代币 ATA 的签名
 	queryAddrs := []string{address}
-	if usdtAta, err := FindATAAddress(address, USDT_Mint); err == nil {
-		queryAddrs = append(queryAddrs, usdtAta)
-	} else {
-		log.Sugar.Errorf("[SOL][%s] failed to derive USDT ATA: %v", address, err)
-	}
-	if usdcAta, err := FindATAAddress(address, USDC_Mint); err == nil {
-		queryAddrs = append(queryAddrs, usdcAta)
-	} else {
-		log.Sugar.Errorf("[SOL][%s] failed to derive USDC ATA: %v", address, err)
+	for mint := range mintTokens {
+		ata, err := FindATAAddress(address, mint)
+		if err != nil {
+			log.Sugar.Errorf("[SOL][%s] failed to derive ATA for mint %s: %v", address, mint, err)
+			continue
+		}
+		queryAddrs = append(queryAddrs, ata)
 	}
 
 	// 拉取签名并去重
@@ -177,7 +202,7 @@ func SolCallBack(address string, wg *sync.WaitGroup) {
 				continue
 			}
 
-			token, amount := getTokenTypeAndAmount(transferInfo)
+			token, amount := resolveSolTokenAndAmount(transferInfo, mintTokens, nativeSolToken)
 			if token == "" || amount <= 0 {
 				continue
 			}
@@ -256,6 +281,21 @@ type solSignatureResult struct {
 	BlockTime *int64      `json:"blockTime"`
 }
 
+func resolveSolanaRpcURL() (string, error) {
+	node, err := data.SelectRpcNode(mdb.NetworkSolana, mdb.RpcNodeTypeHttp)
+	if err != nil {
+		return "", err
+	}
+	if node == nil || node.ID == 0 {
+		return "", fmt.Errorf("no enabled %s %s RPC node configured in rpc_nodes", mdb.NetworkSolana, mdb.RpcNodeTypeHttp)
+	}
+	rpcURL := strings.TrimSpace(node.Url)
+	if rpcURL == "" {
+		return "", fmt.Errorf("rpc_nodes id=%d has empty url", node.ID)
+	}
+	return rpcURL, nil
+}
+
 // SolRetryClient 发送 Solana JSON-RPC 请求，自动重试
 func SolRetryClient(method string, params []interface{}) ([]byte, error) {
 	client := resty.New()
@@ -272,7 +312,10 @@ func SolRetryClient(method string, params []interface{}) ([]byte, error) {
 		return false
 	})
 
-	rpcUrl := config.GetSolanaRpcUrl()
+	rpcUrl, err := resolveSolanaRpcURL()
+	if err != nil {
+		return nil, err
+	}
 
 	resp, err := client.R().
 		SetHeader("Content-Type", "application/json").
@@ -363,35 +406,42 @@ func isTransferToAddress(transfer *TransferInfo, targetAddress string) bool {
 	return MatchAtaAddress(targetAddress, transfer.Mint, transfer.Destination)
 }
 
-// getTokenTypeAndAmount 根据 mint 识别代币类型并计算可读金额
-func getTokenTypeAndAmount(transfer *TransferInfo) (string, float64) {
+// resolveSolTokenAndAmount identifies the token from a transfer using
+// the admin-configured chain_tokens list. mintTokens maps SPL mint
+// addresses to their ChainToken config; nativeSolToken is non-nil when a
+// native SOL entry exists in chain_tokens. Returns ("", 0) for
+// transfers whose mint is not configured or below min_amount.
+func resolveSolTokenAndAmount(transfer *TransferInfo, mintTokens map[string]*mdb.ChainToken, nativeSolToken *mdb.ChainToken) (string, float64) {
 	mint := transfer.Mint
 
 	// Native SOL
 	if mint == "SOL" {
-		return "SOL", transfer.Amount
+		if nativeSolToken == nil {
+			return "", 0
+		}
+		amount := transfer.Amount
+		if nativeSolToken.MinAmount > 0 && amount < nativeSolToken.MinAmount {
+			return "", 0
+		}
+		return strings.ToUpper(strings.TrimSpace(nativeSolToken.Symbol)), amount
 	}
 
-	// SPL Tokens
-	switch mint {
-	case USDT_Mint:
-		decimals := USDT_Decimals
-		if transfer.Decimals != nil {
-			decimals = int(*transfer.Decimals)
-		}
-		return "USDT", ADJustAmount(transfer.RawAmount, decimals)
-
-	case USDC_Mint:
-		decimals := USDC_Decimals
-		if transfer.Decimals != nil {
-			decimals = int(*transfer.Decimals)
-		}
-		return "USDC", ADJustAmount(transfer.RawAmount, decimals)
-
-	default:
-		// Unsupported token
+	cfg, ok := mintTokens[mint]
+	if !ok || cfg == nil {
 		return "", 0
 	}
+	decimals := cfg.Decimals
+	if transfer.Decimals != nil {
+		decimals = int(*transfer.Decimals)
+	}
+	if decimals <= 0 {
+		decimals = 6
+	}
+	amount := ADJustAmount(transfer.RawAmount, decimals)
+	if cfg.MinAmount > 0 && amount < cfg.MinAmount {
+		return "", 0
+	}
+	return strings.ToUpper(strings.TrimSpace(cfg.Symbol)), amount
 }
 
 const (
@@ -437,7 +487,7 @@ func ADJustAmount(amount uint64, decimals int) float64 {
 func MatchUsdtAtaAddress(address string, ataTo string) bool {
 	ata, err := FindATAAddress(address, USDT_Mint)
 	if err != nil {
-		fmt.Printf("FindATAAddress failed: %v\n", err)
+		log.Sugar.Errorf("FindATAAddress failed: %v", err)
 		return false
 	}
 
@@ -447,7 +497,7 @@ func MatchUsdtAtaAddress(address string, ataTo string) bool {
 func MatchUsdcAtaAddress(address string, ataTo string) bool {
 	ata, err := FindATAAddress(address, USDC_Mint)
 	if err != nil {
-		fmt.Printf("FindATAAddress failed: %v\n", err)
+		log.Sugar.Errorf("FindATAAddress failed: %v", err)
 		return false
 	}
 
@@ -457,7 +507,7 @@ func MatchUsdcAtaAddress(address string, ataTo string) bool {
 func MatchAtaAddress(address string, mint string, ataTo string) bool {
 	ata, err := FindATAAddress(address, mint)
 	if err != nil {
-		fmt.Printf("FindATAAddress failed: %v\n", err)
+		log.Sugar.Errorf("FindATAAddress failed: %v", err)
 		return false
 	}
 

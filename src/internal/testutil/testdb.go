@@ -4,10 +4,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/assimon/luuu/config"
-	"github.com/assimon/luuu/model/dao"
-	"github.com/assimon/luuu/model/mdb"
-	appLog "github.com/assimon/luuu/util/log"
+	"github.com/GMWalletApp/epusdt/config"
+	"github.com/GMWalletApp/epusdt/model/dao"
+	"github.com/GMWalletApp/epusdt/model/mdb"
+	appLog "github.com/GMWalletApp/epusdt/util/log"
 	"github.com/libtnb/sqlite"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -20,35 +20,83 @@ func SetupTestDatabases(t testing.TB) func() {
 	t.Helper()
 
 	viper.Reset()
-	viper.Set("forced_usdt_rate", 1.0)
 	viper.Set("app_uri", "https://example.com")
 	viper.Set("order_expiration_time", 10)
 	viper.Set("order_notice_max_retry", 2)
 	viper.Set("callback_retry_base_seconds", 1)
 	viper.Set("queue_concurrency", 4)
 	viper.Set("queue_poll_interval_ms", 50)
-	viper.Set("api_auth_token", "test-token")
 
 	config.HTTPAccessLog = false
 	config.SQLDebug = false
 	config.LogLevel = "error"
-	config.UsdtRate = 0
 	appLog.Sugar = zap.NewNop().Sugar()
 
 	mainDB := mustOpenSQLite(t, filepath.Join(t.TempDir(), "main.db"))
 	runtimeDB := mustOpenSQLite(t, filepath.Join(t.TempDir(), "runtime.db"))
 
-	mustMigrate(t, mainDB, &mdb.Orders{}, &mdb.WalletAddress{})
+	mustMigrate(t, mainDB,
+		&mdb.Orders{},
+		&mdb.WalletAddress{},
+		&mdb.ApiKey{},
+		&mdb.Setting{},
+		&mdb.NotificationChannel{},
+		&mdb.Chain{},
+		&mdb.ChainToken{},
+		&mdb.RpcNode{},
+		&mdb.AdminUser{},
+	)
 	mustMigrate(t, runtimeDB, &mdb.TransactionLock{})
 
 	dao.Mdb = mainDB
 	dao.RuntimeDB = runtimeDB
+	config.SettingsGetString = func(key string) string {
+		if dao.Mdb == nil {
+			return ""
+		}
+		var row mdb.Setting
+		if err := dao.Mdb.Where("`key` = ?", key).Take(&row).Error; err != nil {
+			return ""
+		}
+		return row.Value
+	}
+
+	// Seed all standard chains as enabled so IsChainEnabled checks pass.
+	for _, network := range []string{
+		mdb.NetworkTron, mdb.NetworkSolana, mdb.NetworkEthereum,
+		mdb.NetworkBsc, mdb.NetworkPolygon, mdb.NetworkPlasma,
+	} {
+		mainDB.Create(&mdb.Chain{Network: network, Enabled: true})
+	}
+
+	// Seed two universal api_keys rows. Both usable for EPAY/GMPAY
+	// flows; the numeric PID 1001 row lets legacy tests that submit
+	// `pid=1001` still match.
+	mainDB.Create(&mdb.ApiKey{
+		Name: "test-default",
+		Pid:  "test-token", SecretKey: "test-token",
+		Status: mdb.ApiKeyStatusEnable,
+	})
+	mainDB.Create(&mdb.ApiKey{
+		Name: "test-pid-1001",
+		Pid:  "1001", SecretKey: "test-token",
+		Status: mdb.ApiKeyStatusEnable,
+	})
+	if err := dao.Mdb.Create(&mdb.Setting{
+		Group: "rate",
+		Key:   "rate.forced_usdt_rate",
+		Value: "1.0",
+		Type:  "string",
+	}).Error; err != nil {
+		t.Fatalf("seed rate.forced_usdt_rate: %v", err)
+	}
 
 	return func() {
 		closeDB(t, runtimeDB)
 		closeDB(t, mainDB)
 		dao.Mdb = nil
 		dao.RuntimeDB = nil
+		config.SettingsGetString = nil
 		viper.Reset()
 	}
 }

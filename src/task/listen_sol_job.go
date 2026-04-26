@@ -3,10 +3,10 @@ package task
 import (
 	"sync"
 
-	"github.com/assimon/luuu/model/data"
-	"github.com/assimon/luuu/model/mdb"
-	"github.com/assimon/luuu/model/service"
-	"github.com/assimon/luuu/util/log"
+	"github.com/GMWalletApp/epusdt/model/data"
+	"github.com/GMWalletApp/epusdt/model/mdb"
+	"github.com/GMWalletApp/epusdt/model/service"
+	"github.com/GMWalletApp/epusdt/util/log"
 )
 
 type ListenSolJob struct{}
@@ -17,6 +17,10 @@ func (r ListenSolJob) Run() {
 	gListenSolJobLock.Lock()
 	defer gListenSolJobLock.Unlock()
 	log.Sugar.Debug("[ListenSolJob] Job triggered")
+	if !data.IsChainEnabled(mdb.NetworkSolana) {
+		log.Sugar.Debug("[ListenSolJob] chain disabled, skipping")
+		return
+	}
 	walletAddress, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkSolana)
 	if err != nil {
 		log.Sugar.Errorf("[ListenSolJob] Failed to get wallet addresses: %v", err)

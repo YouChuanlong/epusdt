@@ -15,11 +15,11 @@
 ### 二、导入Sql
 登录管理刚刚新增数据库，导入`Epusdt`所需的sql文件。 
 
-以下为示范0.01版本 最新数据库请以 https://github.com/assimon/epusdt/blob/master/sql/ 为准
+以下为示范0.01版本 最新数据库请以 https://github.com/GMWalletApp/epusdt/blob/master/sql/ 为准
 
 #### 1.手动下载导入
 
-数据库地址:https://github.com/assimon/epusdt/blob/master/sql/v0.0.1.sql
+数据库地址:https://github.com/GMWalletApp/epusdt/blob/master/sql/v0.0.1.sql
 ![导入Sql](img/sql.png)
 
 #### 2.使用phpMyAdmin导入
@@ -136,8 +136,7 @@ api_auth_token=
 #订单过期时间(单位分钟)
 order_expiration_time=10
 
-#强制汇率(设置此参数后每笔交易将按照此汇率计算，例如:6.4)
-forced_usdt_rate=
+#汇率相关配置请在后台“系统配置 -> 汇率配置”中设置
 ```
 4. ⚠️注意：配置文件里面不认识的不要修改，留空即可，不会改又要瞎改，除非你对项目源代码很熟悉很有信心😁
 

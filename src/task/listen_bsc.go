@@ -7,21 +7,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/assimon/luuu/model/data"
-	"github.com/assimon/luuu/model/mdb"
-	"github.com/assimon/luuu/model/service"
-	"github.com/assimon/luuu/util/log"
+	"github.com/GMWalletApp/epusdt/model/data"
+	"github.com/GMWalletApp/epusdt/model/mdb"
+	"github.com/GMWalletApp/epusdt/model/service"
+	"github.com/GMWalletApp/epusdt/util/log"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
-)
-
-var (
-	// USDT / USDC 合约地址（BSC 主网）
-	bscUsdtContract = common.HexToAddress("0x55d398326f99059fF775485246999027B3197955")
-	bscUsdcContract = common.HexToAddress("0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d")
 )
 
 type bscRecipientSnapshot struct {
@@ -30,7 +24,24 @@ type bscRecipientSnapshot struct {
 
 var bscWatchedRecipients atomic.Pointer[bscRecipientSnapshot]
 
+// StartBscWebSocketListener drives the BSC listener. Checks chain
+// enable status and reloads contract addresses from chain_tokens every
+// 10s so admin-side toggles take effect without a restart.
 func StartBscWebSocketListener() {
+	for {
+		if data.IsChainEnabled(mdb.NetworkBsc) {
+			if contracts := loadChainTokenContracts(mdb.NetworkBsc, "[BSC-WS]"); len(contracts) > 0 {
+				runBscListener(contracts)
+			}
+		}
+		time.Sleep(10 * time.Second)
+	}
+}
+
+func runBscListener(contracts []common.Address) {
+	ctx, cancel := chainEnabledWatchdog(mdb.NetworkBsc, "[BSC-WS]", chainTokenFingerprint(mdb.NetworkBsc))
+	defer cancel()
+
 	wallets, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkBsc)
 	if err != nil {
 		log.Sugar.Errorf("[BSC-WS] Failed to get wallet addresses: %v", err)
@@ -40,25 +51,33 @@ func StartBscWebSocketListener() {
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			w, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkBsc)
-			if err != nil {
-				log.Sugar.Warnf("[BSC-WS] refresh wallet addresses: %v", err)
-				continue
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				w, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkBsc)
+				if err != nil {
+					log.Sugar.Warnf("[BSC-WS] refresh wallet addresses: %v", err)
+					continue
+				}
+				storeBscRecipientsFromWallets(w)
 			}
-			storeBscRecipientsFromWallets(w)
 		}
 	}()
-	wsURL := "wss://bsc.drpc.org"
+
+	wsURL, ok := resolveChainWsURL(mdb.NetworkBsc, "[BSC-WS]")
+	if !ok {
+		return
+	}
+	log.Sugar.Infof("[BSC-WS] connecting to %s watching %d contract(s)", wsURL, len(contracts))
+
 	query := ethereum.FilterQuery{
-		Addresses: []common.Address{
-			bscUsdtContract,
-			bscUsdcContract,
-		},
-		Topics: [][]common.Hash{},
+		Addresses: contracts,
+		Topics:    [][]common.Hash{},
 	}
 
-	runEvmWsLogListener("[BSC-WS]", wsURL, query, func(client *ethclient.Client, vLog types.Log) {
+	runEvmWsLogListener(ctx, "[BSC-WS]", wsURL, query, func(client *ethclient.Client, vLog types.Log) {
 		if len(vLog.Topics) < 3 {
 			return
 		}

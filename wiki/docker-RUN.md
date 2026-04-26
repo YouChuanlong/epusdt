@@ -73,7 +73,6 @@ api_auth_token=
 
 order_expiration_time=10
 order_notice_max_retry=0
-forced_usdt_rate=
 api_rate_url=https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/
 tron_grid_api_key=
 EOF
@@ -83,7 +82,7 @@ EOF
 cat <<EOF > docker-compose.yaml
 services:
   epusdt:
-    image: gmwallet/epusdt:alpine
+    image: gmwallet/epusdt:latest
     restart: always
     build:
       context: .
@@ -101,4 +100,3 @@ docker compose up -d
 5. 配置独角兽后台
 
 商户密钥： http://your_domain/payments/epusdt/v1/order/create-transaction
-
